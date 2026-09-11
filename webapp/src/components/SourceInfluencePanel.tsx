@@ -10,6 +10,7 @@ import {
   Clock,
   Compass,
   Crosshair,
+  ExternalLink,
   Factory,
   Flame,
   Gauge,
@@ -28,10 +29,15 @@ import type { Panel } from "@/hooks/useForecastData";
 import type {
   InversionStatus,
   PlumeVectorsResponse,
-  SourceInfluenceResponse,
   StationReading,
 } from "@/lib/types";
-import { getSourceInfluence } from "@/lib/api";
+import {
+  calculateBearingDeg,
+  calculateUpwindSourceInfluence,
+  haversineDistanceKm,
+  type UpwindSourceInfluenceItem,
+  type UpwindSourceInfluenceResponse,
+} from "@/lib/industrySupabase";
 
 interface Props {
   stations: Panel<StationReading[]>;
@@ -42,8 +48,7 @@ interface Props {
 
 type TabCategory = "overview" | "industries" | "biomass" | "high" | "exposure";
 
-
-const CACHE_STORAGE_KEY_PREFIX = "ncr72_source_influence_cache_";
+const CACHE_STORAGE_KEY_PREFIX = "ncr72_source_influence_136k_";
 
 const ACTIVITY_RATES: Record<string, { label: string; rate_m3_h: number; icon: string }> = {
   rest: { label: "Rest / Indoors", rate_m3_h: 0.5, icon: "🧘" },
@@ -65,8 +70,8 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
   const [activityKey, setActivityKey] = useState<string>("walking");
   const [durationMinutes, setDurationMinutes] = useState<number>(30);
 
-  // Backend response state
-  const [liveData, setLiveData] = useState<SourceInfluenceResponse | null>(null);
+  // 136k+ Supabase Geospatial Source Influence State
+  const [liveData, setLiveData] = useState<UpwindSourceInfluenceResponse | null>(null);
   const [isCached, setIsCached] = useState<boolean>(false);
   const [cachedTime, setCachedTime] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
@@ -96,63 +101,128 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
     return { lat: 28.6139, lon: 77.209, name: "Delhi-ITO" };
   }, [isCustomLoc, customLat, customLon, selectedStation]);
 
-  // Authoritative Backend Fetch with Strict Cached Fallback (Phase 15)
+  // 136k+ Supabase Geospatial Upwind Source Influence Calculation
   useEffect(() => {
-    const ctrl = new AbortController();
+    let isMounted = true;
     setLoading(true);
     setErrorMsg(null);
 
     const cacheKey = `${CACHE_STORAGE_KEY_PREFIX}${evalCoords.lat.toFixed(3)}_${evalCoords.lon.toFixed(3)}`;
 
-    getSourceInfluence(
-      {
-        lat: evalCoords.lat,
-        lon: evalCoords.lon,
-        target_name: evalCoords.name,
-        limit: 25,
-      },
-      ctrl.signal
+    const windSpeed = hour?.wind_speed_ms ?? 3.2;
+    const windDir = hour?.wind_direction_deg ?? 315.0;
+    const pbl = hour?.pbl_height_m ?? inversion?.data?.[0]?.pbl_height_m ?? 650.0;
+    const invDelta = hour?.inversion_delta_t ?? inversion?.data?.[0]?.delta_t_celsius ?? 3.2;
+
+    calculateUpwindSourceInfluence(
+      evalCoords.lat,
+      evalCoords.lon,
+      evalCoords.name,
+      windSpeed,
+      windDir,
+      pbl,
+      invDelta,
+      35
     )
       .then((res) => {
-        setLiveData(res);
+        if (!isMounted) return;
+
+        // Also evaluate NASA FIRMS biomass fire plumes if available from plume feed
+        const fireSources: UpwindSourceInfluenceItem[] = [];
+        if (plume?.data?.plumes && plume.data.plumes.length > 0) {
+          const transportDir = (windDir + 180.0) % 360.0;
+          for (let idx = 0; idx < plume.data.plumes.length; idx++) {
+            const p = plume.data.plumes[idx];
+            const pLat = p.origin?.lat ?? 30.2;
+            const pLon = p.origin?.lon ?? 75.5;
+            const frp = p.origin?.frp_mw || 35;
+            const stateName = p.origin?.source_state || "Punjab/Haryana";
+            const dist = haversineDistanceKm(pLat, pLon, evalCoords.lat, evalCoords.lon);
+            if (dist > 220) continue;
+            const bearing = calculateBearingDeg(pLat, pLon, evalCoords.lat, evalCoords.lon);
+            const angleDiff = Math.abs(((bearing - transportDir + 180) % 360) - 180);
+            const align = angleDiff <= 85 ? Math.max(0, Math.cos((angleDiff * Math.PI) / 180) * 100) : 0;
+            const rawScore = frp * (1 / Math.pow(Math.max(10, dist), 0.85)) * (align / 100);
+            const score = Number(Math.min(0.95, Math.max(0.08, rawScore / 10)).toFixed(2));
+            const plumeId = `FIRE_${pLat.toFixed(2)}_${pLon.toFixed(2)}_${idx}`;
+
+            fireSources.push({
+              id: plumeId,
+              source_id: plumeId,
+              name: `Stubble Fire Plume · ${stateName}`,
+              source_type: "biomass",
+              category: "Agricultural Biomass Burning",
+              tier: "orange",
+              tierColor: "#ff9f1c",
+              tierLabel: "Biomass Burning",
+              latitude: pLat,
+              longitude: pLon,
+              distance_km: Number(dist.toFixed(1)),
+              bearing_deg: bearing,
+              wind_alignment_pct: Number(align.toFixed(1)),
+              confidence_pct: Math.min(95, Math.max(70, Math.round(align * 0.5 + 45))),
+              confidence_level: align > 60 ? "HIGH" : "MEDIUM",
+              influence_score: score,
+              influence_level: score >= 0.5 ? "HIGH" : score >= 0.25 ? "MEDIUM" : "LOW",
+              detail_summary: `Lagrangian Fire Plume · ${dist.toFixed(1)} km upwind · FRP: ${Math.round(frp)} MW`,
+              physics_explanation: `VIIRS active fire detection with ${Math.round(frp)} MW thermal radiation power. Smoke transported along ${Math.round(transportDir)}° wind vector, reaching ${evalCoords.name} in ~${Math.round((dist * 1000) / (windSpeed * 60))} mins.`,
+              daily_pm25_kg: Math.round(frp * 8.5),
+              daily_so2_kg: 12,
+              daily_no2_kg: 28,
+              tons_per_year: Math.round(frp * 2.8),
+              stack_height_m: 350,
+              data_source: "NASA VIIRS Satellite / FIRMS",
+            });
+          }
+        }
+
+        const combinedSources = [...res.ranked_sources, ...fireSources].sort(
+          (a, b) => b.influence_score - a.influence_score
+        );
+
+        const finalResult: UpwindSourceInfluenceResponse = {
+          target: res.target,
+          atmospheric_conditions: res.atmospheric_conditions,
+          ranked_sources: combinedSources,
+          total_evaluated: combinedSources.length,
+        };
+
+        setLiveData(finalResult);
         setIsCached(false);
         setLoading(false);
+
         try {
           localStorage.setItem(
             cacheKey,
-            JSON.stringify({ data: res, time: new Date().toLocaleTimeString() })
+            JSON.stringify({ data: finalResult, time: new Date().toLocaleTimeString() })
           );
         } catch {
-          // ignore localStorage quota errors
+          // ignore quota
         }
       })
       .catch((err) => {
-        if (!ctrl.signal.aborted) {
-          console.warn("Backend source influence API call failed. Attempting cache fallback:", err);
-          // Try local storage cache (Phase 15: Last successfully cached backend response)
-          try {
-            const rawCache = localStorage.getItem(cacheKey);
-            if (rawCache) {
-              const parsed = JSON.parse(rawCache);
-              setLiveData(parsed.data);
-              setIsCached(true);
-              setCachedTime(parsed.time || "Recent");
-            } else {
-              setLiveData(null);
-              setErrorMsg("Source influence telemetry temporarily unavailable for this target.");
-            }
-          } catch {
-            setLiveData(null);
-            setErrorMsg("Source influence feed unavailable.");
+        if (!isMounted) return;
+        console.warn("136k+ Supabase source influence calculation error:", err);
+        try {
+          const rawCache = localStorage.getItem(cacheKey);
+          if (rawCache) {
+            const parsed = JSON.parse(rawCache);
+            setLiveData(parsed.data);
+            setIsCached(true);
+            setCachedTime(parsed.time || "Recent");
+          } else {
+            setErrorMsg("Source influence telemetry temporarily unavailable for this target.");
           }
-          setLoading(false);
+        } catch {
+          setErrorMsg("Source influence feed unavailable.");
         }
+        setLoading(false);
       });
 
     return () => {
-      ctrl.abort();
+      isMounted = false;
     };
-  }, [evalCoords.lat, evalCoords.lon, evalCoords.name]);
+  }, [evalCoords.lat, evalCoords.lon, evalCoords.name, hour, inversion?.data, plume?.data]);
 
   // Atmospheric Context
   const atmosphere = useMemo(() => {
@@ -165,7 +235,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
       transport_direction_deg: ((hour?.wind_direction_deg ?? 315.0) + 180.0) % 360.0,
       pbl_height_m: hour?.pbl_height_m ?? inversion?.data?.[0]?.pbl_height_m ?? 650.0,
       inversion_delta_t_celsius: hour?.inversion_delta_t ?? inversion?.data?.[0]?.delta_t_celsius ?? 3.2,
-      inversion_state: "Moderate Inversion",
+      inversion_state: "Uncapped / Normal",
       mixing_category: "Moderate Mixing",
       trapping_potential: "Moderate",
       trapping_factor: 1.15,
@@ -174,9 +244,9 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
 
   const allSources = liveData?.ranked_sources ?? [];
   const topSources = allSources.slice(0, 3);
-  const industrialSources = allSources.filter((s) => s.source.source_type === "industry");
-  const biomassSources = allSources.filter((s) => s.source.source_type === "biomass");
-  const highInfluenceSources = allSources.filter((s) => s.influence_level === "HIGH" || s.influence_score >= 0.7);
+  const industrialSources = allSources.filter((s) => s.source_type === "industry");
+  const biomassSources = allSources.filter((s) => s.source_type === "biomass");
+  const highInfluenceSources = allSources.filter((s) => s.influence_level === "HIGH" || s.influence_score >= 0.55);
 
   const displayedSources = useMemo(() => {
     if (activeTab === "industries") return industrialSources;
@@ -185,7 +255,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
     return allSources;
   }, [activeTab, allSources, industrialSources, biomassSources, highInfluenceSources]);
 
-  // Activity Inhaled Dose Calculation (Phase 25 & 26)
+  // Activity Inhaled Dose Calculation
   const currentPm25 = selectedStation?.pollutants?.["PM2.5"] ?? 118.5;
   const currentActivity = ACTIVITY_RATES[activityKey] || ACTIVITY_RATES.walking;
   const inhaledDoseUg = Math.round(currentPm25 * currentActivity.rate_m3_h * (durationMinutes / 60));
@@ -219,9 +289,9 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
       <div className="section__head flex flex-wrap items-start justify-between gap-4">
         <div>
           <div className="flex items-center gap-2 mb-1.5">
-            <span className="eyebrow flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-400">
+            <span className="eyebrow flex items-center gap-1.5 text-xs font-semibold uppercase tracking-wider text-cyan-400 font-mono">
               <Crosshair size={13} className="text-cyan-400 animate-pulse" />
-              Location Intelligence · NCR·72
+              GEOSPATIAL INTELLIGENCE · 136K+ INDUSTRIAL REGISTRY
             </span>
             {isCached ? (
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 font-mono flex items-center gap-1">
@@ -231,7 +301,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             ) : (
               <span className="text-[10px] px-2 py-0.5 rounded-full bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 font-mono flex items-center gap-1">
                 <CheckCircle2 size={10} />
-                Authoritative Physics Backend
+                Live 136k+ Supabase Registry Sync
               </span>
             )}
           </div>
@@ -239,7 +309,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             Source influence at your location
           </h2>
           <p className="section__lede section__lede--sm max-w-3xl text-sm text-slate-400 mt-1">
-            Evaluates which identifiable industrial facilities and agricultural biomass fire plumes are most aligned with current atmospheric transport winds toward your selected target.
+            Evaluates which identifiable industrial facilities from our 136,000+ registry and satellite biomass fire plumes are most aligned with current atmospheric transport winds toward your selected target.
           </p>
         </div>
 
@@ -304,7 +374,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
         </div>
       </div>
 
-      {/* Atmospheric Context & Ventilation Bar (Phase 19) */}
+      {/* Atmospheric Context & Ventilation Bar */}
       <div className="source-target-strip grid grid-cols-2 sm:grid-cols-4 gap-2 p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs mt-4">
         <div className="p-2 rounded-lg bg-slate-950/50 border border-slate-800/60">
           <span className="block text-[10px] uppercase font-bold tracking-wider text-slate-400">Target Location</span>
@@ -414,7 +484,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
       <div className="source-influence-grid grid grid-cols-1 lg:grid-cols-[1fr_320px] gap-4 mt-4">
         {/* Left Column: Dynamic Context / Ranked Source Cards */}
         <div className="flex flex-col gap-4">
-          {/* 1. WHY IS MY LOCATION POLLUTED? (Phase 20) */}
+          {/* 1. WHY IS MY LOCATION POLLUTED? */}
           {activeTab === "overview" && (
             <div className="p-4 rounded-2xl bg-gradient-to-br from-slate-900/90 to-slate-950/90 border border-cyan-500/20 shadow-lg flex flex-col gap-3">
               <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
@@ -454,8 +524,8 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
                   <strong className="text-white">{atmosphere.wind_speed_ms.toFixed(1)} m/s</strong>, the primary upwind contributors
                   estimated to have the strongest downwind alignment are{" "}
                   {topSources.map((s, idx) => (
-                    <span key={s.source.source_id}>
-                      <strong className="text-slate-100">{s.source.name}</strong> ({s.distance_km} km,{" "}
+                    <span key={s.source_id}>
+                      <strong className="text-slate-100">{s.name}</strong> ({s.distance_km} km,{" "}
                       {Math.round(s.wind_alignment_pct)}% wind alignment)
                       {idx < topSources.length - 1 ? ", " : "."}
                     </span>
@@ -466,14 +536,14 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
               {/* Top 3 Quick Chips */}
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-xs">
                 {topSources.map((s, i) => (
-                  <div key={s.source.source_id} className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col gap-1">
+                  <div key={s.source_id} className="p-2.5 rounded-xl bg-slate-900/80 border border-slate-800 flex flex-col gap-1">
                     <div className="flex items-center justify-between">
                       <span className="text-[10px] font-bold text-cyan-400 font-mono">#{i + 1} UPWIND</span>
                       <span className={`text-[9px] font-bold px-1.5 py-0.5 rounded border uppercase ${levelColorClass(s.influence_level)}`}>
                         {s.influence_level}
                       </span>
                     </div>
-                    <strong className="text-slate-100 text-xs truncate">{s.source.name}</strong>
+                    <strong className="text-slate-100 text-xs truncate">{s.name}</strong>
                     <span className="text-[10px] text-slate-400">
                       {s.distance_km} km away · {Math.round(s.wind_alignment_pct)}% aligned
                     </span>
@@ -483,7 +553,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             </div>
           )}
 
-          {/* 2. FIRE -> PLUME -> LOCATION STORY (Phase 22) */}
+          {/* 2. FIRE -> PLUME -> LOCATION STORY */}
           {activeTab === "biomass" && (
             <div className="p-4 rounded-2xl bg-gradient-to-br from-amber-950/30 to-slate-950 border border-amber-500/30 shadow-lg flex flex-col gap-3">
               <div className="flex items-center gap-2 border-b border-slate-800 pb-2.5">
@@ -532,7 +602,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             </div>
           )}
 
-          {/* 3. ACTIVITY EXPOSURE SIMULATOR (Phase 26) */}
+          {/* 3. ACTIVITY EXPOSURE SIMULATOR */}
           {activeTab === "exposure" && (
             <div className="p-4 rounded-2xl bg-gradient-to-br from-slate-900 to-slate-950 border border-emerald-500/30 shadow-lg flex flex-col gap-3.5">
               <div className="flex items-center justify-between border-b border-slate-800 pb-2.5">
@@ -630,13 +700,13 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             )}
 
             {displayedSources.map((s) => {
-              const isExpanded = expandedId === s.source.source_id;
-              const isBiomass = s.source.source_type === "biomass";
+              const isExpanded = expandedId === s.source_id;
+              const isBiomass = s.source_type === "biomass";
 
               return (
                 <article
                   className="source-card p-4 rounded-xl bg-slate-900/70 border border-slate-800/80 hover:border-slate-700/80 transition-all shadow-sm"
-                  key={s.source.source_id}
+                  key={s.source_id}
                 >
                   <div className="flex items-start gap-3.5">
                     {/* Icon */}
@@ -652,13 +722,23 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
 
                     {/* Content Body */}
                     <div className="flex-1 min-w-0">
-                      <div className="flex items-center justify-between gap-2">
-                        <div className="flex items-center gap-2 min-w-0">
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2 min-w-0 flex-wrap">
                           <strong className="text-white text-sm font-semibold truncate block">
-                            {s.source.name}
+                            {s.name}
                           </strong>
                           <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-800 text-slate-300 border border-slate-700/50 shrink-0">
-                            {s.source.source_id}
+                            ID: #{s.id}
+                          </span>
+                          <span
+                            className="text-[10px] font-bold px-2 py-0.5 rounded-full border shrink-0"
+                            style={{
+                              color: s.tierColor,
+                              borderColor: `${s.tierColor}55`,
+                              backgroundColor: `${s.tierColor}15`,
+                            }}
+                          >
+                            {s.tierLabel}
                           </span>
                         </div>
 
@@ -672,7 +752,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
                           </span>
                           <button
                             type="button"
-                            onClick={() => setExpandedId(isExpanded ? null : s.source.source_id)}
+                            onClick={() => setExpandedId(isExpanded ? null : s.source_id)}
                             aria-label={isExpanded ? "Collapse physics details" : "Expand physics details"}
                             className="p-1 rounded-md bg-slate-800/60 hover:bg-slate-700 text-slate-400 hover:text-white transition-colors"
                           >
@@ -682,13 +762,13 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
                       </div>
 
                       {/* Detail string */}
-                      <p className="text-xs text-slate-400 mt-0.5 truncate">{s.detail_summary}</p>
+                      <p className="text-xs text-slate-400 mt-1 truncate">{s.detail_summary}</p>
 
                       {/* Key Metrics */}
                       <div className="flex flex-wrap items-center gap-x-4 gap-y-1 mt-2.5 text-xs text-slate-300">
                         <span className="flex items-center gap-1">
                           <MapPin size={12} className="text-cyan-400" />
-                          <strong>{s.distance_km} km</strong> away ({s.bearing_deg}° bearing)
+                          <strong>{s.distance_km} km</strong> away ({Math.round(s.bearing_deg)}° bearing)
                         </span>
                         <span className="flex items-center gap-1">
                           <Wind size={12} className="text-cyan-400" />
@@ -711,36 +791,53 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
                         />
                       </div>
 
-                      {/* Expandable Physics Breakdown (Phase 17) */}
+                      {/* Expandable Physics Breakdown */}
                       {isExpanded && (
-                        <div className="mt-3 p-3 rounded-lg bg-slate-950/80 border border-slate-800 text-xs text-slate-300 flex flex-col gap-2">
+                        <div className="mt-3 p-3.5 rounded-lg bg-slate-950/90 border border-slate-800 text-xs text-slate-300 flex flex-col gap-2.5">
                           <div className="flex items-center gap-1.5 text-cyan-400 font-semibold text-[11px] uppercase tracking-wide">
                             <Info size={13} />
-                            Physics & Transport Rationale
+                            Physics & Atmospheric Transport Rationale
                           </div>
                           <p className="text-slate-300 leading-relaxed">{s.physics_explanation}</p>
                           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-2 border-t border-slate-800/80 text-[11px]">
                             <div>
-                              <span className="text-slate-400 block">Catalog / Product</span>
-                              <strong className="text-slate-200">{s.source.data_source}</strong>
+                              <span className="text-slate-400 block">Catalog / Registry</span>
+                              <strong className="text-slate-200">{s.data_source}</strong>
                             </div>
                             <div>
-                              <span className="text-slate-400 block">Source Location</span>
+                              <span className="text-slate-400 block">Coordinates</span>
                               <strong className="text-slate-200 font-mono">
-                                {s.source.latitude.toFixed(3)}°, {s.source.longitude.toFixed(3)}°
+                                {s.latitude.toFixed(3)}°N, {s.longitude.toFixed(3)}°E
                               </strong>
                             </div>
                             <div>
-                              <span className="text-slate-400 block">Source Strength</span>
+                              <span className="text-slate-400 block">Daily Emission Budget</span>
                               <strong className="text-slate-200">
-                                {s.source.strength} {s.source.strength_unit}
+                                {s.daily_pm25_kg} kg/day PM2.5 · {s.tons_per_year} t/yr
                               </strong>
                             </div>
                             <div>
-                              <span className="text-slate-400 block">Trapping Mod</span>
-                              <strong className="text-amber-400">{atmosphere.trapping_factor.toFixed(2)}x modifier</strong>
+                              <span className="text-slate-400 block">Stack & Trapping</span>
+                              <strong className="text-amber-400">
+                                {s.stack_height_m}m stack · {atmosphere.trapping_factor.toFixed(2)}x trapping
+                              </strong>
                             </div>
                           </div>
+                          {s.source_type === "industry" && (
+                            <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between">
+                              <span className="text-slate-400 text-[11px]">
+                                Full industrial site profile, compliance history & emission modeling
+                              </span>
+                              <a
+                                href={`/industry-details.html?id=${s.id}&lat=${s.latitude}&lng=${s.longitude}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-300 border border-cyan-500/40 text-xs font-semibold transition-all shadow-sm"
+                              >
+                                Digital Twin Profile <ExternalLink size={12} />
+                              </a>
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -769,7 +866,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             </span>
           </div>
 
-          {/* Compass Visualization (Phase 18) */}
+          {/* Compass Visualization */}
           <div className="source-compass flex flex-col items-center justify-center py-2">
             <div className="source-compass__ring relative w-32 h-32 rounded-full border border-slate-700/80 bg-slate-950/60 flex items-center justify-center shadow-inner">
               <span className="absolute top-1 text-[9px] font-bold text-slate-400">N</span>
@@ -797,7 +894,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
             </div>
           </div>
 
-          {/* Atmospheric Telemetry (Phase 19) */}
+          {/* Atmospheric Telemetry */}
           <div className="flex flex-col gap-2 text-xs divide-y divide-slate-800/60">
             <div className="flex items-center justify-between pt-2">
               <span className="text-slate-400 flex items-center gap-1.5">
@@ -857,7 +954,7 @@ export function SourceInfluencePanel({ stations, plume, inversion, hour }: Props
                 <ArrowUpRight size={12} />
                 Top Estimated Influence
               </span>
-              <strong className="text-white font-semibold line-clamp-1">{topSources[0].source.name}</strong>
+              <strong className="text-white font-semibold line-clamp-1">{topSources[0].name}</strong>
               <p className="text-[11px] text-slate-400 line-clamp-2">{topSources[0].detail_summary}</p>
               <div className="flex items-center justify-between pt-1 border-t border-slate-800 text-[11px]">
                 <span className="text-slate-400">{topSources[0].distance_km} km away</span>

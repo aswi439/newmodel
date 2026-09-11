@@ -17,13 +17,9 @@ import type {
   CityAggregateResponse,
   CityOverview,
   ForecastResponse,
-  IndustryRecord,
-  IndustryTierFilter,
   PlumeVectorsResponse,
   StationReading,
 } from "@/lib/types";
-import { classifyIndustryTier } from "@/lib/types";
-import { fetchDelhiIndustries } from "@/lib/supabase";
 import { useTranslation } from "@/i18n";
 
 // Leaflet's bundle is only fetched when the online renderer actually mounts —
@@ -48,7 +44,6 @@ const LAYER_DEFS: Array<{ key: keyof MapLayers; label: string }> = [
   { key: "stations", label: "Stations" },
   { key: "heatmap", label: "Heatmap" },
   { key: "fires", label: "Fires" },
-  { key: "industries", label: "Industries" },
 ];
 
 const MODE_DEFS: Array<{ key: RenderMode; label: string }> = [
@@ -74,7 +69,7 @@ export function StationMap({
   cursor,
   cityAggregate,
 }: StationMapProps) {
-  const { t } = useTranslation();
+  const { t: _t } = useTranslation();
   const online = useOnline();
   const reduced = useReducedMotion();
 
@@ -83,59 +78,13 @@ export function StationMap({
     stations: true,
     heatmap: false,
     fires: true,
-    industries: true,
+    industries: false,
   });
-  const [industries, setIndustries] = useState<IndustryRecord[]>([]);
-  const [industryTierFilter, setIndustryTierFilter] = useState<IndustryTierFilter>("all");
   const [styleId, setStyleId] = useState<MapStyleId>("dark");
   const [renderMode, setRenderMode] = useState<RenderMode>("auto");
   const [tileFailed, setTileFailed] = useState(false);
 
   const tileErrCount = useRef(0);
-
-  // Fetch Delhi-only industry facilities (Supabase database-level filtered)
-  useEffect(() => {
-    let active = true;
-    fetchDelhiIndustries().then((records) => {
-      if (active && records.length > 0) {
-        setIndustries(records);
-      }
-    });
-    return () => {
-      active = false;
-    };
-  }, []);
-
-  const { filteredIndustries, tier1Count, tier2Count, tier3Count } = useMemo(() => {
-    let t1 = 0;
-    let t2 = 0;
-    let t3 = 0;
-    const filtered: IndustryRecord[] = [];
-
-    for (const ind of industries) {
-      const info = classifyIndustryTier(ind);
-      if (info.tier === 1) t1++;
-      else if (info.tier === 2) t2++;
-      else t3++;
-
-      if (industryTierFilter === "all") {
-        filtered.push(ind);
-      } else if (industryTierFilter === "tier1" && info.tier === 1) {
-        filtered.push(ind);
-      } else if (industryTierFilter === "tier2" && info.tier === 2) {
-        filtered.push(ind);
-      } else if (industryTierFilter === "tier3" && info.tier === 3) {
-        filtered.push(ind);
-      }
-    }
-
-    return {
-      filteredIndustries: filtered,
-      tier1Count: t1,
-      tier2Count: t2,
-      tier3Count: t3,
-    };
-  }, [industries, industryTierFilter]);
 
   // Clean slate whenever style changes
   useEffect(() => {
@@ -253,113 +202,13 @@ export function StationMap({
             </div>
           </div>
 
-          {/* Premium Industry Pollution Stage / Tier Filter Toolbar */}
-          {layers.industries && (
-            <div
-              style={{
-                marginTop: "0.85rem",
-                padding: "0.6rem 0.9rem",
-                background: "linear-gradient(135deg, rgba(24, 20, 50, 0.65) 0%, rgba(15, 23, 42, 0.8) 100%)",
-                border: "1px solid rgba(168, 85, 247, 0.25)",
-                borderRadius: "10px",
-                display: "flex",
-                flexWrap: "wrap",
-                alignItems: "center",
-                justifyContent: "space-between",
-                gap: "0.6rem",
-                backdropFilter: "blur(10px)",
-                boxShadow: "0 4px 20px -5px rgba(0, 0, 0, 0.4)",
-              }}
-            >
-              <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-                <span
-                  style={{
-                    fontSize: "11px",
-                    fontWeight: 700,
-                    letterSpacing: "0.08em",
-                    textTransform: "uppercase",
-                    color: "#c084fc",
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "4px",
-                  }}
-                >
-                  🏭 {t("map.industryPollutionTier")}
-                </span>
-                <span style={{ fontSize: "11px", color: "#475569" }}>•</span>
-                <span style={{ fontSize: "11px", color: "#94a3b8", fontWeight: 500 }}>
-                  {t("map.activeUnits")}: <strong style={{ color: "#f8fafc" }}>{filteredIndustries.length.toLocaleString()}</strong> {t("map.ofUnits")} {industries.length.toLocaleString()} {t("map.units")}
-                </span>
-              </div>
-
-              <div style={{ display: "flex", flexWrap: "wrap", gap: "0.4rem" }}>
-                <button
-                  type="button"
-                  className={`btn btn--solid map__ctrlBtn`}
-                  style={{
-                    fontSize: "11px",
-                    padding: "3px 9px",
-                    borderColor: industryTierFilter === "all" ? "#a855f7" : "rgba(148, 163, 184, 0.2)",
-                    background: industryTierFilter === "all" ? "rgba(168, 85, 247, 0.25)" : "transparent",
-                    color: industryTierFilter === "all" ? "#ffffff" : "#94a3b8",
-                  }}
-                  onClick={() => setIndustryTierFilter("all")}
-                >
-                  {t("map.allTiers")} ({industries.length.toLocaleString()})
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn--solid map__ctrlBtn`}
-                  style={{
-                    fontSize: "11px",
-                    padding: "3px 9px",
-                    color: industryTierFilter === "tier1" ? "#ffffff" : "#fca5a5",
-                    borderColor: industryTierFilter === "tier1" ? "#ef4444" : "rgba(239, 68, 68, 0.35)",
-                    background: industryTierFilter === "tier1" ? "rgba(239, 68, 68, 0.3)" : "rgba(239, 68, 68, 0.08)",
-                  }}
-                  onClick={() => setIndustryTierFilter("tier1")}
-                >
-                  🔴 {t("map.tier1")} ({tier1Count.toLocaleString()})
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn--solid map__ctrlBtn`}
-                  style={{
-                    fontSize: "11px",
-                    padding: "3px 9px",
-                    color: industryTierFilter === "tier2" ? "#ffffff" : "#fdba74",
-                    borderColor: industryTierFilter === "tier2" ? "#f97316" : "rgba(249, 115, 22, 0.35)",
-                    background: industryTierFilter === "tier2" ? "rgba(249, 115, 22, 0.3)" : "rgba(249, 115, 22, 0.08)",
-                  }}
-                  onClick={() => setIndustryTierFilter("tier2")}
-                >
-                  🟠 {t("map.tier2")} ({tier2Count.toLocaleString()})
-                </button>
-                <button
-                  type="button"
-                  className={`btn btn--solid map__ctrlBtn`}
-                  style={{
-                    fontSize: "11px",
-                    padding: "3px 9px",
-                    color: industryTierFilter === "tier3" ? "#ffffff" : "#d8b4fe",
-                    borderColor: industryTierFilter === "tier3" ? "#a855f7" : "rgba(168, 85, 247, 0.35)",
-                    background: industryTierFilter === "tier3" ? "rgba(168, 85, 247, 0.3)" : "rgba(168, 85, 247, 0.08)",
-                  }}
-                  onClick={() => setIndustryTierFilter("tier3")}
-                >
-                  🟢 {t("map.tier3")} ({tier3Count.toLocaleString()})
-                </button>
-              </div>
-            </div>
-          )}
-
           <div className="map__viewport plume__mapWrap" style={{ marginTop: '1.2rem' }}>
             {useTiles ? (
               <Suspense fallback={<Skeleton style={{ width: "100%", height: "100%" }} />}>
                 <MapLeaflet
                   stations={layers.stations ? stationList : []}
                   plume={plume.data}
-                  industries={layers.industries ? filteredIndustries : []}
+                  industries={[]}
                   layers={layers}
                   style={MAP_STYLES[styleId]}
                   selectedUid={selectedUid}
@@ -371,7 +220,7 @@ export function StationMap({
               <MapCanvas
                 stations={stationList}
                 plume={plume.data}
-                industries={layers.industries ? filteredIndustries : []}
+                industries={[]}
                 layers={layers}
                 style={styleId}
                 cursor={cursor}

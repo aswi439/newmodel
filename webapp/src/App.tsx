@@ -15,6 +15,7 @@ import { TransportPage } from "@/components/TransportPage";
 import { HealthCareAssistantPage } from "@/components/HealthCareAssistantPage";
 import { AlertsPage } from "@/components/AlertsPage";
 import { AqiReportPage } from "@/components/AqiReportPage";
+import { IndustryMapView } from "@/components/IndustryMapView";
 import { PollutantCardStackSection } from "@/components/PollutantCardStackSection";
 import { SourceInfluencePanel } from "@/components/SourceInfluencePanel";
 import GradualBlur from "@/components/ui/GradualBlur";
@@ -87,6 +88,13 @@ export default function App() {
       ) {
         return "report";
       }
+      if (
+        window.location.hash === "#industry-map" ||
+        window.location.hash === "#industry-intelligence" ||
+        window.location.hash === "#industries"
+      ) {
+        return "industry-map";
+      }
     }
     return "overview";
   });
@@ -118,6 +126,12 @@ export default function App() {
         window.location.hash === "#transport"
       ) {
         setCurrentPage("transports");
+      } else if (
+        window.location.hash === "#industry-map" ||
+        window.location.hash === "#industry-intelligence" ||
+        window.location.hash === "#industries"
+      ) {
+        setCurrentPage("industry-map");
       } else if (
         window.location.hash === "#health-assistant" ||
         window.location.hash === "#healthcare" ||
@@ -155,6 +169,8 @@ export default function App() {
         ? "exposure-tracker"
         : page === "transports"
         ? "transports"
+        : page === "industry-map"
+        ? "industry-map"
         : page === "health-assistant"
         ? "health-assistant"
         : page === "alerts"
@@ -328,6 +344,12 @@ export default function App() {
           inversion={data.inversion}
           onBack={() => handlePageChange("overview")}
         />
+      ) : currentPage === "industry-map" ? (
+        <IndustryMapView
+          onBack={() => handlePageChange("overview")}
+          windSpeedKmh={realtime.weatherapi.data?.wind_kph ?? 12.0}
+          windDirectionDeg={realtime.weatherapi.data?.wind_deg ?? 300}
+        />
       ) : (
         <main ref={mainRef}>
           {/* 1. Hero Section (AQI Value with Full Screen Video Background) */}
@@ -389,6 +411,14 @@ export default function App() {
             inversion={data.inversion}
             hour={hour}
           />
+
+          {/* 4.5. Interactive Industry Map View & Digital Twin Section (136k+ Supabase DB) */}
+          <div id="industry-interactive-map-section" className="section my-12">
+            <IndustryMapView
+              windSpeedKmh={realtime.weatherapi.data?.wind_kph ?? 12.0}
+              windDirectionDeg={realtime.weatherapi.data?.wind_deg ?? 300}
+            />
+          </div>
 
           {/* 5. List All Live Stations */}
           <div id="stations-grid">

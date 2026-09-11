@@ -311,6 +311,17 @@ if _console_available:
             return FileResponse(sf)
         raise HTTPException(status_code=404)
 
+    @app.get("/industry-details.html", include_in_schema=False)
+    @app.get("/console/industry-details.html", include_in_schema=False)
+    async def industry_details_page():
+        ind_file = _console_dir / "industry-details.html"
+        if ind_file.is_file():
+            return FileResponse(ind_file)
+        public_file = Path(__file__).resolve().parents[2] / "webapp" / "public" / "industry-details.html"
+        if public_file.is_file():
+            return FileResponse(public_file)
+        raise HTTPException(status_code=404, detail="Industry details page not found")
+
     # html=True serves index.html at the mount root; assets resolve under
     # /console/assets/… or /assets/…
     app.mount(

@@ -11,6 +11,7 @@ import {
   Truck,
   Building2,
   Users,
+  Factory,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -25,6 +26,7 @@ export type PageType =
   | "atmospheric-dynamics"
   | "exposure-tracker"
   | "transports"
+  | "industry-map"
   | "health-assistant"
   | "alerts"
   | "report";
@@ -55,7 +57,8 @@ export function Rail({
     currentPage === "forecast-datas" ||
     currentPage === "historic-data" ||
     currentPage === "atmospheric-dynamics" ||
-    currentPage === "transports";
+    currentPage === "transports" ||
+    currentPage === "industry-map";
 
   const isCitizenPage =
     currentPage === "exposure-tracker" ||
@@ -109,6 +112,7 @@ export function Rail({
     { id: "historic-data", label: t("navigation.historic"), icon: History },
     { id: "atmospheric-dynamics", label: t("navigation.atmosphere"), icon: CloudRain },
     { id: "transports", label: t("navigation.transports") || "Transports", icon: Truck },
+    { id: "industry-map", label: "Industry Intelligence & Map", icon: Factory },
   ];
 
   const citizenItems = [
