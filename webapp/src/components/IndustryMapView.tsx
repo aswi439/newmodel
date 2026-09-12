@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import { InteractiveIndustryMap } from "./InteractiveIndustryMap";
 import { IndustryIntelligenceSection } from "./IndustryIntelligenceSection";
 import type { SupabaseIndustryRecord } from "@/lib/industrySupabase";
@@ -17,6 +17,14 @@ export function IndustryMapView({
   const [selectedIndustry, setSelectedIndustry] = useState<SupabaseIndustryRecord | null>(null);
   const [radiusKm, setRadiusKm] = useState<number>(15);
   const [activeIndustries, setActiveIndustries] = useState<SupabaseIndustryRecord[]>([]);
+
+  const handleSelectIndustry = useCallback((ind: SupabaseIndustryRecord | null) => {
+    setSelectedIndustry(ind);
+  }, []);
+
+  const handleIndustriesInRadiusChange = useCallback((recs: SupabaseIndustryRecord[]) => {
+    setActiveIndustries(recs);
+  }, []);
 
   return (
     <div className="w-full max-w-7xl mx-auto px-4 py-8 space-y-10 animate-fadeIn" id="industry-intelligence-main-view">
@@ -42,10 +50,10 @@ export function IndustryMapView({
 
         <InteractiveIndustryMap
           selectedIndustry={selectedIndustry}
-          onSelectIndustry={setSelectedIndustry}
+          onSelectIndustry={handleSelectIndustry}
           radiusKm={radiusKm}
           onRadiusChange={setRadiusKm}
-          onIndustriesInRadiusChange={setActiveIndustries}
+          onIndustriesInRadiusChange={handleIndustriesInRadiusChange}
           windSpeedKmh={windSpeedKmh}
           windDirectionDeg={windDirectionDeg}
         />
@@ -55,7 +63,7 @@ export function IndustryMapView({
       <section>
         <IndustryIntelligenceSection
           selectedIndustry={selectedIndustry}
-          onSelectIndustry={setSelectedIndustry}
+          onSelectIndustry={handleSelectIndustry}
           radiusKm={radiusKm}
           activeIndustries={activeIndustries}
           windSpeedKmh={windSpeedKmh}

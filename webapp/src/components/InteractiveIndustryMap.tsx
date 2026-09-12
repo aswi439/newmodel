@@ -399,12 +399,34 @@ export function InteractiveIndustryMap({
   const [showPlumeHalo, setShowPlumeHalo] = useState(true);
   const [isFullscreen, setIsFullscreen] = useState(false);
 
-  // Callback when viewport changes
+  // Callback when viewport changes with equality guard
   const handleViewportChange = useCallback(
     (padded: ViewportBounds, exact: ViewportBounds, zoom: number) => {
-      setFetchBounds(padded);
-      setExactBounds(exact);
-      setCurrentZoom(zoom);
+      setFetchBounds((prev) => {
+        if (
+          prev &&
+          Math.abs(prev.south - padded.south) < 0.0001 &&
+          Math.abs(prev.north - padded.north) < 0.0001 &&
+          Math.abs(prev.west - padded.west) < 0.0001 &&
+          Math.abs(prev.east - padded.east) < 0.0001
+        ) {
+          return prev;
+        }
+        return padded;
+      });
+      setExactBounds((prev) => {
+        if (
+          prev &&
+          Math.abs(prev.south - exact.south) < 0.0001 &&
+          Math.abs(prev.north - exact.north) < 0.0001 &&
+          Math.abs(prev.west - exact.west) < 0.0001 &&
+          Math.abs(prev.east - exact.east) < 0.0001
+        ) {
+          return prev;
+        }
+        return exact;
+      });
+      setCurrentZoom((prev) => (prev === zoom ? prev : zoom));
     },
     []
   );
@@ -474,10 +496,13 @@ export function InteractiveIndustryMap({
     });
   }, [records, exactBounds]);
 
-  // Focus point for radius buffer
-  const activeFocusPoint = selectedIndustry
-    ? { lat: selectedIndustry.latitude, lng: selectedIndustry.longitude }
-    : centerCoords;
+  // Focus point for radius buffer memoized to prevent recreation on every render
+  const activeFocusPoint = useMemo(() => {
+    if (selectedIndustry) {
+      return { lat: selectedIndustry.latitude, lng: selectedIndustry.longitude };
+    }
+    return centerCoords;
+  }, [selectedIndustry?.id, selectedIndustry?.latitude, selectedIndustry?.longitude, centerCoords.lat, centerCoords.lng]);
 
   const industriesInRadius = useMemo(() => {
     return visibleSectionRecords.filter((r) => {
@@ -491,9 +516,15 @@ export function InteractiveIndustryMap({
     });
   }, [visibleSectionRecords, activeFocusPoint, radiusKm]);
 
+  const prevRadiusIdsRef = useRef<string>("");
+
   useEffect(() => {
     if (onIndustriesInRadiusChange) {
-      onIndustriesInRadiusChange(industriesInRadius);
+      const idsKey = industriesInRadius.map((r) => r.id).join(",");
+      if (prevRadiusIdsRef.current !== idsKey) {
+        prevRadiusIdsRef.current = idsKey;
+        onIndustriesInRadiusChange(industriesInRadius);
+      }
     }
   }, [industriesInRadius, onIndustriesInRadiusChange]);
 
